@@ -29,9 +29,9 @@ jobs:
           PUBLIC_DATA_API_KEY: ${{ secrets.PUBLIC_DATA_API_KEY }}
         run: |
           if [ -n "${{ github.event.inputs.month }}" ]; then
-            python scripts/sync_population.py --month "${{ github.event.inputs.month }}" --only-new
+            python scripts/sync_population.py --month "${{ github.event.inputs.month }}" --only-new --full-collection
           else
-            python scripts/sync_population.py --auto-month --only-new
+            python scripts/sync_population.py --auto-month --lookback-months 12 --only-new --full-collection
           fi
 
       - name: Commit updated DB

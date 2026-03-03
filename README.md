@@ -14,14 +14,17 @@
 ```bash
 # Windows PowerShell
 $env:PUBLIC_DATA_API_KEY="발급받은_서비스키"
-python scripts/sync_population.py --auto-month --only-new
+python scripts/sync_population.py --auto-month --lookback-months 12 --only-new --full-collection
 ```
 
 옵션:
 
 - `--month YYYYMM` 대상 월 (기본: 전월)
 - `--auto-month` API에서 최신 데이터가 있는 월을 자동 탐색
+- `--lookback-months` 최신 데이터 탐색 범위 (기본 6)
 - `--only-new` DB에 이미 같은/더 최신 월이 있으면 스킵
+- `--full-collection` 기본 17개 시도 코드를 순회하며 풀수집
+- `--stdg-cd-list` 풀수집 대상 `stdgCd` 직접 지정(콤마 구분)
 - `--stdg-cd` 법정동 코드 (기본: `0000000000`)
 - `--lv` 조회레벨 (기본: `3`)
 - `--save-raw` 원본 페이지 JSON 저장

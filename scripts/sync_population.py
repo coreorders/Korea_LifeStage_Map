@@ -274,6 +274,85 @@ def resolve_month_candidates(args: argparse.Namespace) -> list[str]:
     return [yyyymm_from_date(add_months(base, -1 - i)) for i in range(lookback)]
 
 
+def fetch_all_items(
+    *,
+    month: str,
+    stdg_code: str,
+    lv: str,
+    reg_se_cd: str,
+    num_of_rows: int,
+    max_pages: int,
+    service_keys: list[str],
+    save_raw_flag: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    all_items: list[dict[str, Any]] = []
+    page_no = 1
+    page_count = 0
+    while True:
+        params = {
+            "stdgCd": stdg_code,
+            "srchFrYm": month,
+            "srchToYm": month,
+            "lv": lv,
+            "regSeCd": reg_se_cd,
+            "numOfRows": str(num_of_rows),
+            "pageNo": str(page_no),
+            "type": "json",
+        }
+        payload = fetch_page_with_keys(params, service_keys)
+        head, items, parsed_total_count = parse_payload(payload)
+        result_code = str(head.get("resultCode", "")).strip()
+        result_msg = str(head.get("resultMsg", "")).strip()
+        if result_code and result_code != "00":
+            raise RuntimeError(f"API error code={result_code}, msg={result_msg}")
+
+        if save_raw_flag:
+            save_raw(payload, month, page_no)
+
+        if page_no == 1:
+            print(
+                f"[probe] month={month} lv={lv} stdgCd={stdg_code} "
+                f"totalCount={parsed_total_count} page1_items={len(items)}"
+            )
+
+        all_items.extend(items)
+        page_count += 1
+        page_items = len(items)
+        if page_items == 0:
+            break
+        if parsed_total_count > 0 and len(all_items) >= parsed_total_count:
+            break
+        if max_pages > 0 and page_no >= max_pages:
+            break
+
+        page_no += 1
+        time.sleep(0.2)
+
+    return all_items, page_count
+
+
+def discover_codes_for_lv3(
+    *, month: str, sido_codes: list[str], args: argparse.Namespace, service_keys: list[str]
+) -> list[str]:
+    discovered: set[str] = set()
+    for sido_code in sido_codes:
+        items, _ = fetch_all_items(
+            month=month,
+            stdg_code=sido_code,
+            lv="2",
+            reg_se_cd=args.reg_se_cd,
+            num_of_rows=args.num_of_rows,
+            max_pages=args.max_pages,
+            service_keys=service_keys,
+            save_raw_flag=False,
+        )
+        for item in items:
+            code = pick(item, ["stdgCd", "stdgcd"])
+            if code:
+                discovered.add(code)
+    return sorted(discovered)
+
+
 def main() -> int:
     args = parse_args()
     service_keys = api_keys_or_exit()
@@ -309,74 +388,63 @@ def main() -> int:
             month_items = 0
             month_pages = 0
             print(f"[month] trying {month_candidate}")
-            for stdg_code in stdg_codes:
-                print(f"[target] month={month_candidate} stdgCd={stdg_code} lv={args.lv}")
-                page_no = 1
-                target_items = 0
-                while True:
-                    params = {
-                        "stdgCd": stdg_code,
-                        "srchFrYm": month_candidate,
-                        "srchToYm": month_candidate,
-                        "lv": args.lv,
-                        "regSeCd": args.reg_se_cd,
-                        "numOfRows": str(args.num_of_rows),
-                        "pageNo": str(page_no),
-                        "type": "json",
-                    }
-                    payload = fetch_page_with_keys(params, service_keys)
-                    head, items, parsed_total_count = parse_payload(payload)
-                    result_code = str(head.get("resultCode", "")).strip()
-                    result_msg = str(head.get("resultMsg", "")).strip()
-                    if result_code and result_code != "00":
-                        raise RuntimeError(f"API error code={result_code}, msg={result_msg}")
-
-                    if args.save_raw:
-                        save_raw(payload, month_candidate, page_no)
-
-                    fetched_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-                    for item in items:
-                        row_key = make_row_key(item)
-                        payload_json = json.dumps(item, ensure_ascii=False, sort_keys=True)
-                        stats_ym = pick(item, ["statsYm", "statsYM"])
-                        stdg_cd = pick(item, ["stdgCd", "stdgcd"])
-                        admm_cd = pick(item, ["admmCd", "admmcd"])
-                        cur.execute(
-                            """
-                            INSERT INTO population_items
-                            (run_month, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                            ON CONFLICT(run_month, row_key) DO UPDATE SET
-                              stats_ym = excluded.stats_ym,
-                              stdg_cd = excluded.stdg_cd,
-                              admm_cd = excluded.admm_cd,
-                              payload_json = excluded.payload_json,
-                              fetched_at = excluded.fetched_at
-                            WHERE population_items.payload_json <> excluded.payload_json
-                            """,
-                            (month_candidate, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at),
-                        )
-
-                    conn.commit()
-                    page_items = len(items)
-                    target_items += page_items
-                    month_items += page_items
-                    month_pages += 1
+            working_codes = stdg_codes
+            working_lv = args.lv
+            if args.full_collection and args.lv == "3":
+                sigungu_codes = discover_codes_for_lv3(
+                    month=month_candidate, sido_codes=stdg_codes, args=args, service_keys=service_keys
+                )
+                if sigungu_codes:
+                    working_codes = sigungu_codes
                     print(
-                        f"[stdgCd {stdg_code}] page={page_no} items={page_items} "
-                        f"target_items={target_items} month_items={month_items}"
+                        f"[discovery] month={month_candidate} lv=2 discovered sigungu codes: {len(working_codes)}"
+                    )
+                else:
+                    print(
+                        f"[discovery] month={month_candidate} no lv=2 codes found; fallback to sido codes"
                     )
 
-                    total_count = parsed_total_count
-                    if page_items == 0:
-                        break
-                    if total_count > 0 and target_items >= total_count:
-                        break
-                    if args.max_pages > 0 and page_no >= args.max_pages:
-                        break
-
-                    page_no += 1
-                    time.sleep(0.2)
+            for stdg_code in working_codes:
+                print(f"[target] month={month_candidate} stdgCd={stdg_code} lv={args.lv}")
+                items, pages = fetch_all_items(
+                    month=month_candidate,
+                    stdg_code=stdg_code,
+                    lv=working_lv,
+                    reg_se_cd=args.reg_se_cd,
+                    num_of_rows=args.num_of_rows,
+                    max_pages=args.max_pages,
+                    service_keys=service_keys,
+                    save_raw_flag=args.save_raw,
+                )
+                fetched_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+                for item in items:
+                    row_key = make_row_key(item)
+                    payload_json = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                    stats_ym = pick(item, ["statsYm", "statsYM"])
+                    stdg_cd = pick(item, ["stdgCd", "stdgcd"])
+                    admm_cd = pick(item, ["admmCd", "admmcd"])
+                    cur.execute(
+                        """
+                        INSERT INTO population_items
+                        (run_month, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(run_month, row_key) DO UPDATE SET
+                          stats_ym = excluded.stats_ym,
+                          stdg_cd = excluded.stdg_cd,
+                          admm_cd = excluded.admm_cd,
+                          payload_json = excluded.payload_json,
+                          fetched_at = excluded.fetched_at
+                        WHERE population_items.payload_json <> excluded.payload_json
+                        """,
+                        (month_candidate, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at),
+                    )
+                conn.commit()
+                target_items = len(items)
+                month_items += target_items
+                month_pages += pages
+                print(
+                    f"[stdgCd {stdg_code}] pages={pages} items={target_items} month_items={month_items}"
+                )
 
             if month_items > 0:
                 selected_month = month_candidate

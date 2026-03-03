@@ -238,62 +238,12 @@ def add_months(first_day: dt.date, delta_months: int) -> dt.date:
     return dt.date(year, month, 1)
 
 
-def resolve_target_month(args: argparse.Namespace) -> str:
+def resolve_month_candidates(args: argparse.Namespace) -> list[str]:
     if args.month:
-        return args.month
-    if not args.auto_month:
-        today = dt.date.today().replace(day=1)
-        prev_month = add_months(today, -1)
-        return yyyymm_from_date(prev_month)
-    # For automation stability, pick previous month without probe.
-    # The API publication timing can vary and probe can create false negatives.
-    today = dt.date.today().replace(day=1)
-    prev_month = add_months(today, -1)
-    return yyyymm_from_date(prev_month)
-
-
-def month_has_any_data(
-    month: str,
-    stdg_codes: list[str],
-    service_keys: list[str],
-    lv: str,
-    reg_se_cd: str,
-) -> bool:
-    for code in stdg_codes:
-        params = {
-            "stdgCd": code,
-            "srchFrYm": month,
-            "srchToYm": month,
-            "lv": lv,
-            "regSeCd": reg_se_cd,
-            "numOfRows": "1",
-            "pageNo": "1",
-            "type": "json",
-        }
-        payload = fetch_page_with_keys(params, service_keys)
-        head, items = parse_payload(payload)
-        result_code = str(head.get("resultCode", "")).strip()
-        result_msg = str(head.get("resultMsg", "")).strip()
-        if result_code and result_code != "00":
-            raise RuntimeError(f"API error code={result_code}, msg={result_msg}")
-        total_count = to_int(head.get("totalCount"), default=0)
-        if total_count > 0 or len(items) > 0:
-            return True
-    return False
-
-
-def resolve_target_month_with_fallback(
-    args: argparse.Namespace, service_keys: list[str], stdg_codes: list[str]
-) -> str:
-    if args.month:
-        return args.month
-
+        return [args.month]
     base = dt.date.today().replace(day=1)
-    for i in range(max(args.lookback_months, 1)):
-        candidate = yyyymm_from_date(add_months(base, -1 - i))
-        if month_has_any_data(candidate, stdg_codes, service_keys, args.lv, args.reg_se_cd):
-            return candidate
-    raise RuntimeError(f"No data found in last {args.lookback_months} month(s)")
+    lookback = max(args.lookback_months, 1)
+    return [yyyymm_from_date(add_months(base, -1 - i)) for i in range(lookback)]
 
 
 def main() -> int:
@@ -302,11 +252,8 @@ def main() -> int:
     db_path = Path(args.db_path)
     stdg_codes = get_target_stdg_codes(args)
 
-    try:
-        target_month = resolve_target_month_with_fallback(args, service_keys, stdg_codes)
-    except Exception as exc:
-        print(f"Target month resolve failed: {exc}", file=sys.stderr)
-        return 1
+    months_to_try = resolve_month_candidates(args)
+    target_month = months_to_try[0]
 
     if args.only_new:
         latest_synced = get_latest_synced_month(db_path)
@@ -329,78 +276,93 @@ def main() -> int:
     total_items = 0
     total_pages = 0
     try:
-        for stdg_code in stdg_codes:
-            print(f"[target] month={target_month} stdgCd={stdg_code} lv={args.lv}")
-            page_no = 1
-            target_items = 0
-            while True:
-                params = {
-                    "stdgCd": stdg_code,
-                    "srchFrYm": target_month,
-                    "srchToYm": target_month,
-                    "lv": args.lv,
-                    "regSeCd": args.reg_se_cd,
-                    "numOfRows": str(args.num_of_rows),
-                    "pageNo": str(page_no),
-                    "type": "json",
-                }
-                payload = fetch_page_with_keys(params, service_keys)
-                head, items = parse_payload(payload)
-                result_code = str(head.get("resultCode", "")).strip()
-                result_msg = str(head.get("resultMsg", "")).strip()
-                if result_code and result_code != "00":
-                    raise RuntimeError(f"API error code={result_code}, msg={result_msg}")
+        selected_month = ""
+        for month_candidate in months_to_try:
+            month_items = 0
+            month_pages = 0
+            print(f"[month] trying {month_candidate}")
+            for stdg_code in stdg_codes:
+                print(f"[target] month={month_candidate} stdgCd={stdg_code} lv={args.lv}")
+                page_no = 1
+                target_items = 0
+                while True:
+                    params = {
+                        "stdgCd": stdg_code,
+                        "srchFrYm": month_candidate,
+                        "srchToYm": month_candidate,
+                        "lv": args.lv,
+                        "regSeCd": args.reg_se_cd,
+                        "numOfRows": str(args.num_of_rows),
+                        "pageNo": str(page_no),
+                        "type": "json",
+                    }
+                    payload = fetch_page_with_keys(params, service_keys)
+                    head, items = parse_payload(payload)
+                    result_code = str(head.get("resultCode", "")).strip()
+                    result_msg = str(head.get("resultMsg", "")).strip()
+                    if result_code and result_code != "00":
+                        raise RuntimeError(f"API error code={result_code}, msg={result_msg}")
 
-                if args.save_raw:
-                    save_raw(payload, target_month, page_no)
+                    if args.save_raw:
+                        save_raw(payload, month_candidate, page_no)
 
-                fetched_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-                for item in items:
-                    row_key = make_row_key(item)
-                    payload_json = json.dumps(item, ensure_ascii=False, sort_keys=True)
-                    stats_ym = pick(item, ["statsYm", "statsYM"])
-                    stdg_cd = pick(item, ["stdgCd", "stdgcd"])
-                    admm_cd = pick(item, ["admmCd", "admmcd"])
-                    cur.execute(
-                        """
-                        INSERT INTO population_items
-                        (run_month, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(run_month, row_key) DO UPDATE SET
-                          stats_ym = excluded.stats_ym,
-                          stdg_cd = excluded.stdg_cd,
-                          admm_cd = excluded.admm_cd,
-                          payload_json = excluded.payload_json,
-                          fetched_at = excluded.fetched_at
-                        WHERE population_items.payload_json <> excluded.payload_json
-                        """,
-                        (target_month, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at),
+                    fetched_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+                    for item in items:
+                        row_key = make_row_key(item)
+                        payload_json = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                        stats_ym = pick(item, ["statsYm", "statsYM"])
+                        stdg_cd = pick(item, ["stdgCd", "stdgcd"])
+                        admm_cd = pick(item, ["admmCd", "admmcd"])
+                        cur.execute(
+                            """
+                            INSERT INTO population_items
+                            (run_month, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(run_month, row_key) DO UPDATE SET
+                              stats_ym = excluded.stats_ym,
+                              stdg_cd = excluded.stdg_cd,
+                              admm_cd = excluded.admm_cd,
+                              payload_json = excluded.payload_json,
+                              fetched_at = excluded.fetched_at
+                            WHERE population_items.payload_json <> excluded.payload_json
+                            """,
+                            (month_candidate, stats_ym, stdg_cd, admm_cd, row_key, payload_json, fetched_at),
+                        )
+
+                    conn.commit()
+                    page_items = len(items)
+                    target_items += page_items
+                    month_items += page_items
+                    month_pages += 1
+                    print(
+                        f"[stdgCd {stdg_code}] page={page_no} items={page_items} "
+                        f"target_items={target_items} month_items={month_items}"
                     )
 
-                conn.commit()
-                page_items = len(items)
-                target_items += page_items
-                total_items += page_items
-                total_pages += 1
-                print(
-                    f"[stdgCd {stdg_code}] page={page_no} items={page_items} "
-                    f"target_items={target_items} total_items={total_items}"
-                )
+                    total_count = to_int(head.get("totalCount"), default=0)
+                    if page_items == 0:
+                        break
+                    if total_count > 0 and target_items >= total_count:
+                        break
+                    if args.max_pages > 0 and page_no >= args.max_pages:
+                        break
 
-                total_count = to_int(head.get("totalCount"), default=0)
-                if page_items == 0:
-                    break
-                if total_count > 0 and target_items >= total_count:
-                    break
-                if args.max_pages > 0 and page_no >= args.max_pages:
-                    break
+                    page_no += 1
+                    time.sleep(0.2)
 
-                page_no += 1
-                time.sleep(0.2)
+            if month_items > 0:
+                selected_month = month_candidate
+                total_items = month_items
+                total_pages = month_pages
+                target_month = month_candidate
+                break
+
+            print(f"[month] no data for {month_candidate}, trying older month...")
 
         if total_items == 0 and not args.allow_empty:
             raise RuntimeError(
-                "No rows fetched. Check service key/parameters (stdgCd, lv, regSeCd, month)."
+                f"No rows fetched in candidate months: {', '.join(months_to_try)}. "
+                "Check service key/parameters (stdgCd, lv, regSeCd)."
             )
 
         done_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"

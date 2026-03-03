@@ -13,7 +13,8 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.error import HTTPError
+from urllib.parse import unquote, urlencode
 from urllib.request import Request, urlopen
 
 API_URL = "https://apis.data.go.kr/1741000/stdgSexdAgePpltn/selectStdgSexdAgePpltn"
@@ -35,10 +36,23 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def api_key_or_exit() -> str:
-    key = os.getenv("PUBLIC_DATA_API_KEY") or os.getenv("DATA_GO_KR_SERVICE_KEY")
-    if key:
-        return key
+def api_keys_or_exit() -> list[str]:
+    raw = os.getenv("PUBLIC_DATA_API_KEY") or os.getenv("DATA_GO_KR_SERVICE_KEY")
+    if not raw:
+        print(
+            "Missing API key. Set PUBLIC_DATA_API_KEY (or DATA_GO_KR_SERVICE_KEY).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    raw = raw.strip().strip('"').strip("'")
+    decoded = unquote(raw)
+    keys: list[str] = []
+    for candidate in (raw, decoded):
+        if candidate and candidate not in keys:
+            keys.append(candidate)
+    if keys:
+        return keys
     print(
         "Missing API key. Set PUBLIC_DATA_API_KEY (or DATA_GO_KR_SERVICE_KEY).",
         file=sys.stderr,
@@ -155,6 +169,23 @@ def fetch_page(params: dict[str, Any]) -> dict[str, Any]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def fetch_page_with_keys(params: dict[str, Any], service_keys: list[str]) -> dict[str, Any]:
+    last_error: Exception | None = None
+    for key in service_keys:
+        p = dict(params)
+        p["serviceKey"] = key
+        try:
+            return fetch_page(p)
+        except HTTPError as exc:
+            if exc.code == 401:
+                last_error = exc
+                continue
+            raise
+    if last_error:
+        raise last_error
+    raise RuntimeError("No valid service key candidate")
+
+
 def save_raw(payload: dict[str, Any], month: str, page_no: int) -> None:
     raw_dir = Path("data/raw") / month
     raw_dir.mkdir(parents=True, exist_ok=True)
@@ -174,14 +205,13 @@ def add_months(first_day: dt.date, delta_months: int) -> dt.date:
 
 def probe_month_has_data(
     *,
-    key: str,
+    service_keys: list[str],
     month: str,
     stdg_cd: str,
     lv: str,
     reg_se_cd: str,
 ) -> bool:
     params = {
-        "serviceKey": key,
         "stdgCd": stdg_cd,
         "srchFrYm": month,
         "srchToYm": month,
@@ -191,7 +221,7 @@ def probe_month_has_data(
         "pageNo": "1",
         "type": "json",
     }
-    payload = fetch_page(params)
+    payload = fetch_page_with_keys(params, service_keys)
     head, items = parse_payload(payload)
     result_code = str(head.get("resultCode", "")).strip()
     result_msg = str(head.get("resultMsg", "")).strip()
@@ -201,7 +231,7 @@ def probe_month_has_data(
     return total_count > 0 or len(items) > 0
 
 
-def resolve_target_month(args: argparse.Namespace, key: str) -> str:
+def resolve_target_month(args: argparse.Namespace, service_keys: list[str]) -> str:
     if args.month:
         return args.month
     if not args.auto_month:
@@ -213,7 +243,7 @@ def resolve_target_month(args: argparse.Namespace, key: str) -> str:
     for i in range(0, max(args.lookback_months, 1)):
         candidate = yyyymm_from_date(add_months(base, -i))
         if probe_month_has_data(
-            key=key,
+            service_keys=service_keys,
             month=candidate,
             stdg_cd=args.stdg_cd,
             lv=args.lv,
@@ -225,11 +255,11 @@ def resolve_target_month(args: argparse.Namespace, key: str) -> str:
 
 def main() -> int:
     args = parse_args()
-    key = api_key_or_exit()
+    service_keys = api_keys_or_exit()
     db_path = Path(args.db_path)
 
     try:
-        target_month = resolve_target_month(args, key)
+        target_month = resolve_target_month(args, service_keys)
     except Exception as exc:
         print(f"Target month resolve failed: {exc}", file=sys.stderr)
         return 1
@@ -258,7 +288,6 @@ def main() -> int:
         page_no = 1
         while True:
             params = {
-                "serviceKey": key,
                 "stdgCd": args.stdg_cd,
                 "srchFrYm": target_month,
                 "srchToYm": target_month,
@@ -268,7 +297,7 @@ def main() -> int:
                 "pageNo": str(page_no),
                 "type": "json",
             }
-            payload = fetch_page(params)
+            payload = fetch_page_with_keys(params, service_keys)
             head, items = parse_payload(payload)
             result_code = str(head.get("resultCode", "")).strip()
             result_msg = str(head.get("resultMsg", "")).strip()

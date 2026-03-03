@@ -47,6 +47,10 @@ python scripts/sync_population.py --auto-month --only-new
 2. 데이터 페이지 이동: `https://www.data.go.kr/tcs/dss/selectApiDataDetailView.do?publicDataPk=15108074`
 3. `활용신청` 버튼 클릭
 4. 앱 이름/용도 입력 후 신청 완료
-5. 마이페이지에서 `일반 인증키(Decoding)` 확인/복사
+5. 마이페이지에서 `일반 인증키(Decoding)` 확인/복사 (권장)
 6. GitHub 저장소 `Settings > Secrets and variables > Actions > New repository secret`
 7. 이름 `PUBLIC_DATA_API_KEY`, 값에 인증키 붙여넣기
+
+주의:
+- `Encoding 키`를 넣으면 401이 날 수 있습니다. `Decoding 키`를 넣으세요.
+- 앞뒤 공백/따옴표가 들어가면 인증 실패합니다.

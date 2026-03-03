@@ -150,18 +150,46 @@ def get_target_stdg_codes(args: argparse.Namespace) -> list[str]:
     return [args.stdg_cd]
 
 
-def parse_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+def parse_payload(payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], int]:
+    """
+    Supports both common formats:
+    1) response.head + response.items.item
+    2) response.header + response.body.items.item
+    """
     root = payload.get("response", payload)
-    head = root.get("head", {})
+
+    # header/head
+    head = root.get("head", root.get("header", {}))
     if isinstance(head, list) and head:
         head = head[0]
-    items = root.get("items", {})
+    if not isinstance(head, dict):
+        head = {}
+
+    # body/items
+    body = root.get("body", root)
+    items = body.get("items", root.get("items", {})) if isinstance(body, dict) else {}
     if isinstance(items, list) and items:
         items = items[0]
-    item = items.get("item", []) if isinstance(items, dict) else []
+
+    item = []
+    if isinstance(items, dict):
+        item = items.get("item", [])
+    elif isinstance(items, list):
+        item = items
     if isinstance(item, dict):
         item = [item]
-    return head if isinstance(head, dict) else {}, item if isinstance(item, list) else []
+    if not isinstance(item, list):
+        item = []
+
+    # totalCount can appear in head/body/root
+    total_count = to_int(
+        body.get("totalCount", head.get("totalCount", root.get("totalCount", 0)))
+        if isinstance(body, dict)
+        else head.get("totalCount", root.get("totalCount", 0)),
+        default=0,
+    )
+
+    return head, item, total_count
 
 
 def to_int(value: Any, default: int = 0) -> int:
@@ -297,7 +325,7 @@ def main() -> int:
                         "type": "json",
                     }
                     payload = fetch_page_with_keys(params, service_keys)
-                    head, items = parse_payload(payload)
+                    head, items, parsed_total_count = parse_payload(payload)
                     result_code = str(head.get("resultCode", "")).strip()
                     result_msg = str(head.get("resultMsg", "")).strip()
                     if result_code and result_code != "00":
@@ -339,7 +367,7 @@ def main() -> int:
                         f"target_items={target_items} month_items={month_items}"
                     )
 
-                    total_count = to_int(head.get("totalCount"), default=0)
+                    total_count = parsed_total_count
                     if page_items == 0:
                         break
                     if total_count > 0 and target_items >= total_count:

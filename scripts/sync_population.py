@@ -203,54 +203,18 @@ def add_months(first_day: dt.date, delta_months: int) -> dt.date:
     return dt.date(year, month, 1)
 
 
-def probe_month_has_data(
-    *,
-    service_keys: list[str],
-    month: str,
-    stdg_cd: str,
-    lv: str,
-    reg_se_cd: str,
-) -> bool:
-    params = {
-        "stdgCd": stdg_cd,
-        "srchFrYm": month,
-        "srchToYm": month,
-        "lv": lv,
-        "regSeCd": reg_se_cd,
-        "numOfRows": "1",
-        "pageNo": "1",
-        "type": "json",
-    }
-    payload = fetch_page_with_keys(params, service_keys)
-    head, items = parse_payload(payload)
-    result_code = str(head.get("resultCode", "")).strip()
-    result_msg = str(head.get("resultMsg", "")).strip()
-    if result_code and result_code != "00":
-        raise RuntimeError(f"API error code={result_code}, msg={result_msg}")
-    total_count = to_int(head.get("totalCount"), default=0)
-    return total_count > 0 or len(items) > 0
-
-
-def resolve_target_month(args: argparse.Namespace, service_keys: list[str]) -> str:
+def resolve_target_month(args: argparse.Namespace) -> str:
     if args.month:
         return args.month
     if not args.auto_month:
         today = dt.date.today().replace(day=1)
         prev_month = add_months(today, -1)
         return yyyymm_from_date(prev_month)
-
-    base = dt.date.today().replace(day=1)
-    for i in range(0, max(args.lookback_months, 1)):
-        candidate = yyyymm_from_date(add_months(base, -i))
-        if probe_month_has_data(
-            service_keys=service_keys,
-            month=candidate,
-            stdg_cd=args.stdg_cd,
-            lv=args.lv,
-            reg_se_cd=args.reg_se_cd,
-        ):
-            return candidate
-    raise RuntimeError(f"No data found in last {args.lookback_months} month(s)")
+    # For automation stability, pick previous month without probe.
+    # The API publication timing can vary and probe can create false negatives.
+    today = dt.date.today().replace(day=1)
+    prev_month = add_months(today, -1)
+    return yyyymm_from_date(prev_month)
 
 
 def main() -> int:
@@ -259,7 +223,7 @@ def main() -> int:
     db_path = Path(args.db_path)
 
     try:
-        target_month = resolve_target_month(args, service_keys)
+        target_month = resolve_target_month(args)
     except Exception as exc:
         print(f"Target month resolve failed: {exc}", file=sys.stderr)
         return 1

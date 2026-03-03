@@ -1,0 +1,47 @@
+name: Daily population sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      month:
+        description: "Target month (YYYYMM). Empty uses previous month."
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 2 * * *" # every day 02:00 UTC
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run sync
+        env:
+          PUBLIC_DATA_API_KEY: ${{ secrets.PUBLIC_DATA_API_KEY }}
+        run: |
+          if [ -n "${{ github.event.inputs.month }}" ]; then
+            python scripts/sync_population.py --month "${{ github.event.inputs.month }}" --only-new
+          else
+            python scripts/sync_population.py --auto-month --only-new
+          fi
+
+      - name: Commit updated DB
+        run: |
+          if [ -n "$(git status --porcelain data/population.db 2>/dev/null)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/population.db
+            git commit -m "chore: daily population sync"
+            git push
+          else
+            echo "No DB changes."
+          fi

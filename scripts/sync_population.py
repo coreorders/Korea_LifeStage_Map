@@ -37,6 +37,7 @@ DEFAULT_SIDO_STDG_CODES = [
     "4800000000",  # 경남
     "5000000000",  # 제주
 ]
+ROOT_STDG_CODE = "0000000000"
 
 
 def parse_args() -> argparse.Namespace:
@@ -353,6 +354,33 @@ def discover_codes_for_lv3(
     return sorted(discovered)
 
 
+def discover_codes_for_level(
+    *,
+    month: str,
+    target_lv: str,
+    parent_codes: list[str],
+    args: argparse.Namespace,
+    service_keys: list[str],
+) -> list[str]:
+    discovered: set[str] = set()
+    for parent_code in parent_codes:
+        items, _ = fetch_all_items(
+            month=month,
+            stdg_code=parent_code,
+            lv=target_lv,
+            reg_se_cd=args.reg_se_cd,
+            num_of_rows=args.num_of_rows,
+            max_pages=args.max_pages,
+            service_keys=service_keys,
+            save_raw_flag=False,
+        )
+        for item in items:
+            code = pick(item, ["stdgCd", "stdgcd"])
+            if code:
+                discovered.add(code)
+    return sorted(discovered)
+
+
 def main() -> int:
     args = parse_args()
     service_keys = api_keys_or_exit()
@@ -391,17 +419,34 @@ def main() -> int:
             working_codes = stdg_codes
             working_lv = args.lv
             if args.full_collection and args.lv == "3":
-                sigungu_codes = discover_codes_for_lv3(
-                    month=month_candidate, sido_codes=stdg_codes, args=args, service_keys=service_keys
+                l1_codes = discover_codes_for_level(
+                    month=month_candidate,
+                    target_lv="1",
+                    parent_codes=[ROOT_STDG_CODE],
+                    args=args,
+                    service_keys=service_keys,
                 )
-                if sigungu_codes:
-                    working_codes = sigungu_codes
+                if not l1_codes:
+                    l1_codes = stdg_codes
                     print(
-                        f"[discovery] month={month_candidate} lv=2 discovered sigungu codes: {len(working_codes)}"
+                        f"[discovery] month={month_candidate} lv=1 none; fallback to default sido codes"
                     )
                 else:
+                    print(f"[discovery] month={month_candidate} lv=1 codes: {len(l1_codes)}")
+
+                l2_codes = discover_codes_for_level(
+                    month=month_candidate,
+                    target_lv="2",
+                    parent_codes=l1_codes,
+                    args=args,
+                    service_keys=service_keys,
+                )
+                if l2_codes:
+                    working_codes = l2_codes
+                    print(f"[discovery] month={month_candidate} lv=2 codes: {len(working_codes)}")
+                else:
                     print(
-                        f"[discovery] month={month_candidate} no lv=2 codes found; fallback to sido codes"
+                        f"[discovery] month={month_candidate} lv=2 none; fallback to default sido codes"
                     )
 
             for stdg_code in working_codes:

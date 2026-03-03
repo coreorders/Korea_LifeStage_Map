@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-of-rows", type=int, default=1000)
     parser.add_argument("--max-pages", type=int, default=0, help="0 means all pages")
     parser.add_argument("--save-raw", action="store_true")
+    parser.add_argument("--allow-empty", action="store_true", help="Do not fail when zero rows fetched")
     return parser.parse_args()
 
 
@@ -310,6 +311,11 @@ def main() -> int:
 
             page_no += 1
             time.sleep(0.2)
+
+        if total_items == 0 and not args.allow_empty:
+            raise RuntimeError(
+                "No rows fetched. Check service key/parameters (stdgCd, lv, regSeCd, month)."
+            )
 
         done_at = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
         cur.execute(
